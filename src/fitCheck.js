@@ -11,9 +11,12 @@
  *   （180° 旋转不改变矩形适配结果，仅随结果返回便于前端展示与核对）。
  *
  * 成品页在页位内居中放置，并叠加爬移偏移 offsetMm（正 = 向右）：
- * - trim     成品页矩形（pageWidth × pageHeight，即裁切线）；
- * - bleedBox trim 四边各外扩出血 bleed，必须完全落在纸张矩形内
- *            （折线一侧的出血进入相邻页位属正常工艺，仅纸张外边界构成约束）；
+ * - trim     成品页矩形（pageWidth × pageHeight，即裁切线），叠加爬移后
+ *            必须完整落在所属页位 rect 内（端点恰好贴合页位边界视为可印）；
+ *            越出折线即进入相邻页位、越出纸张外边界均记为 trim-overflow；
+ * - bleedBox trim 四边各外扩出血 bleed，只受整张纸边界约束，必须完全落在
+ *            纸张矩形内（折线一侧的出血进入相邻页位属正常工艺，仅纸张外边界
+ *            构成约束）；
  * - safeBox  trim 四边各内缩安全边距 safety；2 × safety 超过成品页宽 / 高时
  *            安全区不存在，记为超限。
  *
@@ -92,11 +95,15 @@ function parseFitInput(input) {
  * 检查单个页位。
  *
  * @param {object} rect 页位可用矩形 { x, y, width, height }（纸张坐标系，mm）
- * @param {object} opts { paperWidth, paperHeight, pageWidth, pageHeight, bleedMm, safetyMm, offsetMm, rotation }
+ * @param {object} opts { paperWidth, paperHeight, pageWidth, pageHeight, bleedMm, safetyMm, offsetMm, rotation, position }
+ *   position = 'left' | 'right'：页位位于纸张左半 / 右半，用于标注越界方向是否越过折线
  * @returns {object} { ok, rotation, rect, trim, bleedBox, safeBox, violations }
  */
 function checkSlotFit(rect, opts) {
-  const { paperWidth, paperHeight, pageWidth, pageHeight, bleedMm, safetyMm, offsetMm, rotation } = opts;
+  const {
+    paperWidth, paperHeight, pageWidth, pageHeight,
+    bleedMm, safetyMm, offsetMm, rotation, position,
+  } = opts;
   const violations = [];
 
   // 1) 成品页本身须能放入页位
@@ -127,7 +134,43 @@ function checkSlotFit(rect, opts) {
     height: round4(pageHeight + 2 * bleedMm),
   };
 
-  // 2) 出血框必须完全落在纸张内（折线侧出血进入相邻页位不视为超限）
+  // 2) 叠加爬移后的实际裁切框必须完整落在所属页位内（贴合边界不算越界）。
+  //    向中线一侧越界即越过折线进入相邻页位；向外侧越界即超出纸张。
+  const isLeftSlot = position !== 'right';
+  const slotLeft = isLeftSlot ? 0 : round4(paperWidth / 2);
+  const slotRight = isLeftSlot ? round4(paperWidth / 2) : paperWidth;
+  const trimOverflows = [
+    {
+      code: 'trim-overflow-left',
+      label: '左', excess: round4(slotLeft - trim.x),
+      where: isLeftSlot ? '（纸张外边界）' : '（越过折线进入相邻页位）',
+    },
+    {
+      code: 'trim-overflow-top',
+      label: '上', excess: round4(-trim.y),
+      where: '（纸张外边界）',
+    },
+    {
+      code: 'trim-overflow-right',
+      label: '右', excess: round4(trim.x + trim.width - slotRight),
+      where: isLeftSlot ? '（越过折线进入相邻页位）' : '（纸张外边界）',
+    },
+    {
+      code: 'trim-overflow-bottom',
+      label: '下', excess: round4(trim.y + trim.height - paperHeight),
+      where: '（纸张外边界）',
+    },
+  ];
+  trimOverflows.forEach(({ code, label, excess, where }) => {
+    if (excess > EPS) {
+      violations.push({
+        code,
+        message: `裁切框${label}侧超出所属页位 ${fmt(excess)}mm${where}（含爬移偏移 ${fmt(offsetMm)}mm）`,
+      });
+    }
+  });
+
+  // 3) 出血框只受整张纸边界约束（折线侧出血进入相邻页位不视为超限）
   const overflow = [
     ['left', '左', -bleedBox.x],
     ['top', '上', -bleedBox.y],
@@ -143,7 +186,7 @@ function checkSlotFit(rect, opts) {
     }
   });
 
-  // 3) 安全区：trim 四边内缩 safety 后须仍然存在
+  // 4) 安全区：trim 四边内缩 safety 后须仍然存在
   const safeW = pageWidth - 2 * safetyMm;
   const safeH = pageHeight - 2 * safetyMm;
   let safeBox = null;
@@ -197,9 +240,9 @@ function attachFit(result, fit) {
         { side: sheet.back, rotation: backRotation },
       ].forEach(({ side, rotation }) => {
         [
-          { slot: side.left, x: 0 },
-          { slot: side.right, x: slotWidth },
-        ].forEach(({ slot, x }) => {
+          { slot: side.left, x: 0, position: 'left' },
+          { slot: side.right, x: slotWidth, position: 'right' },
+        ].forEach(({ slot, x, position }) => {
           const rect = { x, y: 0, width: slotWidth, height: slotHeight };
           slot.fit = checkSlotFit(rect, {
             paperWidth,
@@ -210,6 +253,7 @@ function attachFit(result, fit) {
             safetyMm,
             offsetMm: slot.offsetMm || 0,
             rotation,
+            position,
           });
           totalSlots += 1;
           if (!slot.fit.ok) failCount += 1;

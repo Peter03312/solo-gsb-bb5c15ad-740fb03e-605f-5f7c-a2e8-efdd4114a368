@@ -11,7 +11,7 @@
 - **按帖拆分页码**，生成每张纸正、反面的左右页位；
 - 背面依据 **长边 / 短边翻转** 执行坐标变换，保证裁切折叠后的阅读顺序；
 - 可选 **爬移补偿（creep compensation）**：按纸张厚度由外向内平移内层页位，画布叠加原始页位虚线框与补偿后实线框，每个页位（含空白页）输出 `offsetMm`；均衡分帖下按**各帖实际层数**独立重算；
-- 可选 **纸张规格与出血 / 安全区适配检查**：输入纸张宽高、成品页宽高、出血与安全边距后，按每个正反页位的实际方向计算可用矩形，逐页位判定成品页是否放得下、出血是否落在纸张内、安全边距是否过大，并在逐张预览与清单中标出不合格页位；
+- 可选 **纸张规格与出血 / 安全区适配检查**：输入纸张宽高、成品页宽高、出血与安全边距后，按每张纸每个页位叠加爬移后的实际位置计算可用矩形，逐页位判定**裁切框是否完整落在所属左 / 右页位内**（爬移把裁切线推过折线进入相邻页位、或推出纸张外缘均判超限，给出越界方向与超出量；恰好贴合页位边界可印）、**出血框是否落在整张纸内**（出血只受纸张边界约束，允许越过折线进入相邻页位）、安全边距是否过大，并在逐张预览与清单中标出不合格页位；
 - 可选 **双面生产标记**：启用适配检查后可勾选，为每张纸正、背面生成**裁切线**（四个成品页外角各两段）、**折线标**（中线上下两端）与**套准十字**（左右出血框外侧，每侧按「居中 → 1/4 → 3/4」固定候选位置顺序尝试）；线段只有**完整落在纸内、不穿入两侧出血框内部且不与同面已放置标记相交**才落位（与出血框边界共线或仅端点相接允许，例如出血为 0 时折线标沿折线与两侧出血框共边仍正常放置），无可用位置则**省略并逐候选返回原因**；背面标记由正面按长边 / 短边翻转做**同一物理位置的坐标变换**，保证正背套准，爬移变化后同步重算；
 - 可选 **试印核验**：对照实物纸张录入 1～12 条观察（帖 / 张 / 正背面 / 左右页位 / 看到的页码或空白 / 内容朝向），服务端用同一输入重算「左/右装订 × 长/短边翻转」四种设置逐条比对，仅唯一零差异组合判定验证通过，并列最优时返回无法判定及并列组合；**无法判定时自动从尚未观察的页位计算「下一处观察建议」**（含定位与各候选预期值）；
 - 可选 **印刷备料**：填写成品份数、每帖开机损耗张数、过程损耗率与每包张数，按拼版结果**各帖实际张数**逐帖计算净用纸，并以 `需领纸 = ceil((净用纸 + 开机损耗) / (1 − 过程损耗率))` **逐帖向上取整**（损耗率按十进制字面值以整数运算精确计算，普通小数与科学计数法结果一致；如净用纸 1 张、开机 0、损耗率 `1e-10` 时须领 2 张而非 1 张；Web 表单的百分数按用户输入的十进制文本精确换算上送，如 `0.9`% → `"0.009"`，不做浮点除法，非法或超范围输入给出可读提示），再汇总后按整包向上采购（**禁止先合并各帖再计算损耗**）；张数结果超出安全整数范围时返回明确 400 错误；页面逐帖展示净用纸、开机损耗、过程损耗与需领纸及整包采购汇总，导出 JSON 的 `materialPrep` 段附带相同数据；
@@ -169,10 +169,13 @@ npm test           # 运行全部测试（拼版逻辑单元测试 + HTTP 接口
 
 - 每个页位的**可用矩形**为纸张的一半：左页位 `[0, W/2] × [0, H]`，右页位 `[W/2, W] × [0, H]`；背面页位与正面共用同一坐标系（长边翻转左右不变、短边翻转左右互换），每个页位同时返回内容方向 `rotation`（长边翻转的背面为 180°，其余为 0°）；
 - 成品页在页位内**居中放置**，并叠加该页位的爬移偏移 `offsetMm`，得到裁切框 `trim`；
-- **出血框** `bleedBox` = `trim` 四边各外扩出血，必须完全落在纸张矩形内（折线一侧的出血进入相邻页位属正常工艺，仅纸张外边界构成约束）；
+- **裁切框 `trim` 必须完整落在所属页位矩形内**（按每张纸每个页位叠加爬移后的实际裁切框判定）：`trim.x ≥ 页位左缘`、`trim.x + width ≤ 页位右缘`、上下同理。爬移把裁切线**推过折线进入相邻页位**或**推出纸张外缘**均记 `trim-overflow-{left,top,right,bottom}`，消息给出越界方向、超出量（mm）及该侧是「越过折线进入相邻页位」还是「纸张外边界」；**裁切框恰好贴合页位边界（超出量为 0）视为可印**；
+- **出血框** `bleedBox` = `trim` 四边各外扩出血，**只受整张纸边界约束**：必须完全落在纸张矩形内，**允许越过折线进入相邻页位**（折线一侧的出血进入相邻页位属正常工艺，仅纸张外边界构成约束）；越出纸张仍记 `bleed-overflow-{left,top,right,bottom}`；
 - **安全区** `safeBox` = `trim` 四边各内缩安全边距；`2 × 安全边距` 超过成品页宽 / 高时安全区不存在，记为超限。
 
-每个页位（含空白页）输出 `fit`：`{ ok, rotation, rect, trim, bleedBox, safeBox, violations }`，`violations` 逐条给出超限原因（`page-too-wide` / `page-too-tall` / `bleed-overflow-{left,top,right,bottom}` / `safety-too-wide` / `safety-too-tall`，含具体超出量）；顶层 `fit` 汇总 `ok / totalSlots / failCount`。画布上蓝框 = 裁切线、绿/红虚框 = 出血范围（红 = 超出纸张）、灰点框 = 安全区，不合格页位带红色圆徽，清单对应单元格标红并列出原因。
+每个页位（含空白页）输出 `fit`：`{ ok, rotation, rect, trim, bleedBox, safeBox, violations }`，`violations` 逐条给出超限原因（`page-too-wide` / `page-too-tall` / `trim-overflow-{left,top,right,bottom}` / `bleed-overflow-{left,top,right,bottom}` / `safety-too-wide` / `safety-too-tall`，含具体超出量）；顶层 `fit` 汇总 `ok / totalSlots / failCount`，任一裁切框越界的页位都计入 `failCount`。画布上蓝框 = 裁切框（越出所属页位时标红）、绿/红虚框 = 出血范围（红 = 超出纸张，越过折线仍为绿色）、灰点框 = 安全区，不合格页位带红色圆徽，清单对应单元格标红并列出原因。
+
+> 本轮修正：此前仅以「成品页静态尺寸是否放得下页位 + 出血框是否超出整张纸」判定，爬移补偿把裁切框推出所属左 / 右页位、但仍留在整张纸内（例如越过折线 1mm）时会误报可印；现改为按叠加爬移后的实际裁切框逐页位判定。未启用适配检查时结果结构与数值与旧版本完全一致。
 
 ### 双面生产标记（duplex production marks）
 
@@ -596,7 +599,7 @@ npm test           # 运行全部测试（拼版逻辑单元测试 + HTTP 接口
 - `flip`：`long`（长边翻转）或 `short`（短边翻转）
 - `paperThickness`：**可选**，纸张厚度（mm，≥ 0，缺省为 0）
 - `maxCompensation`：**可选**，爬移最大补偿量（mm，≥ 0，缺省为 0）
-- `paperWidth` / `paperHeight` / `pageWidth` / `pageHeight`：**可选**，纸张与成品页宽高（mm）；全部缺省或为 0 时不做适配检查，提供任意一项则四项必须全部 > 0
+- `paperWidth` / `paperHeight` / `pageWidth` / `pageHeight`：**可选**，纸张与成品页宽高（mm）；全部缺省或为 0 时不做适配检查，提供任意一项则四项必须全部 > 0。启用后按每张纸每个页位叠加爬移后的实际裁切框判定：裁切框必须完整落在所属左 / 右页位内（恰好贴合边界可印；越界返回 `trim-overflow-{left,top,right,bottom}` 及方向 / 超出量 / 是否越过折线），出血框只受整张纸边界约束（允许越过折线进入相邻页位，越出纸张返回 `bleed-overflow-*`），违规页位计入顶层 `fit.failCount`
 - `bleedMm` / `safetyMm`：**可选**，出血与安全边距（mm，≥ 0，缺省为 0）
 - `productionMarks`：**可选**，`true` 启用双面生产标记（缺省 / `false` 不启用，结果与旧版本完全一致）；启用时必须已提供四项尺寸开启适配检查，否则返回 400
 - `markSizeMm`：**可选**，生产标记尺寸（mm，> 0 且 ≤ 100，缺省 5；仅启用生产标记时校验，空串 / `null` 取缺省值）
@@ -728,6 +731,17 @@ npm test           # 运行全部测试（拼版逻辑单元测试 + HTTP 接口
 }
 ```
 
+爬移把裁切框推出所属页位（越过折线或纸张外缘）时，`violations` 另含 `trim-overflow-{left,top,right,bottom}` 并给出方向、超出量与该侧性质，例如左装订第 2 张右页位（`offsetMm = -1`，页位恰好 210mm 宽）：
+
+```json
+{
+  "code": "trim-overflow-left",
+  "message": "裁切框左侧超出所属页位 1mm（越过折线进入相邻页位）（含爬移偏移 -1mm）"
+}
+```
+
+此时裁切框整体仍在整张纸内，若出血为 0 则**没有**任何 `bleed-overflow-*`；该页位仍判 `ok: false` 并计入顶层 `fit.failCount`。裁切框恰好贴合页位边界时超出量为 0，不产生该违规。出血框越过折线进入相邻页位但未越出纸张时同样不产生 `bleed-overflow-*`。
+
 顶层 `fit` 汇总：`{ enabled, paperWidth, paperHeight, pageWidth, pageHeight, bleedMm, safetyMm, slotWidth, slotHeight, ok, totalSlots, failCount }`；未启用时仅为 `{ "enabled": false }`。
 
 启用双面生产标记时，每张纸对象增加 `productionMarks`：`front` / `back` 各含 `placed[]`（已落位标记：`id` / `type`（`crop` / `fold` / `register`）/ `label` / `position` / `positionLabel` / `side` / `segments[]`（`{x1,y1,x2,y2}`，纸张坐标系 mm）；背面标记另带 `pairedWith` 与 `transform`）与 `omitted[]`（省略标记：`reasonCode` / `reasonSummary` / 完整 `reason` 与逐候选 `attempts`；背面省略记 `paired-front-omitted`）。顶层 `productionMarks` 汇总尺寸、间隙、正背变换与放置 / 省略计数（结构与示例见上文「双面生产标记」一节）；未启用时仅为 `{ "enabled": false }`，纸张对象不带 `productionMarks` 字段。
@@ -796,6 +810,40 @@ curl -s -X POST http://localhost:8080/api/impose \
 # fold-top / fold-bottom 在正、背面 placed 中；
 # 正面 fold-top 线段 { x1: 100, y1: 0, x2: 100, y2: 30 }，
 # 背面按 (x, y) -> (x, H-y) 套准为 { x1: 100, y1: 300, x2: 100, y2: 270 }
+```
+
+调用示例（本轮新增判定：爬移把裁切框推过折线、但仍留在整张纸内时判不适配。420×297 纸张、成品页 210×297 恰好铺满页位宽、无出血，纸张厚度 0.5mm → 第 2 张爬移 1mm；左装订右页位 `offsetMm = -1`，裁切框越过折线 1mm 进入左页位，出血框因出血为 0 与裁切框重合、仍在纸张内）：
+
+```bash
+curl -s -X POST http://localhost:8080/api/impose \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "totalPages": 8,
+    "sheetsPerSignature": 2,
+    "binding": "left",
+    "flip": "short",
+    "paperWidth": 420,
+    "paperHeight": 297,
+    "pageWidth": 210,
+    "pageHeight": 297,
+    "bleedMm": 0,
+    "paperThickness": 0.5,
+    "maxCompensation": 5
+  }' | jq '{ ok: .fit.ok, failCount: .fit.failCount, sheet2: (.signatures[0].sheets[1].front | { left: { trim: .left.fit.trim, codes: [.left.fit.violations[].code] }, right: { trim: .right.fit.trim, codes: [.right.fit.violations[].code] } }) }'
+# => {
+#      "ok": false,
+#      "failCount": 4,
+#      "sheet2": {
+#        "left":  { "trim": { "x": 1,   "y": 0, "width": 210, "height": 297 },
+#                   "codes": ["trim-overflow-right"] },   // 左页位：越过折线 1mm
+#        "right": { "trim": { "x": 209, "y": 0, "width": 210, "height": 297 },
+#                   "codes": ["trim-overflow-left"] }     // 右页位：越过折线 1mm
+#      }
+#    }
+# 任一越界页位的 violations 消息形如：
+#   "裁切框左侧超出所属页位 1mm（越过折线进入相邻页位）（含爬移偏移 -1mm）"
+# 同请求去掉 paperThickness / maxCompensation（或令其为 0）后，裁切框恰好贴合
+# 页位边界，fit.ok = true；出血框越出纸张外边界时仍按 bleed-overflow-* 报错。
 ```
 
 调用示例（启用印刷备料：16 页、2 帖各 2 张、1000 份、每帖开机损耗 10 张、过程损耗率 3%、每包 500 张）：
@@ -925,7 +973,7 @@ curl -s -X POST http://localhost:8080/api/impose \
 ├── src/imposePool.js      # worker_threads 有界线程池（2 线程 × 1 项 + 8 项 FIFO 队列、超时更换线程、异常补建、断开取消）
 ├── src/imposeWorker.js    # 计算工作线程：复用 computeImposition，回执携带任务 id 保证响应归属
 ├── src/imposition.js      # 拼版计算核心（固定 / 均衡 / 章节优先分帖、正反面页位、翻转坐标变换、爬移补偿 offsetMm）
-├── src/fitCheck.js        # 纸张规格与出血 / 安全区适配检查（可用矩形、trim/bleed/safe、超限原因）
+├── src/fitCheck.js        # 纸张规格与出血 / 安全区适配检查（页位可用矩形、叠加爬移后的 trim 越界判定、bleed 仅受纸边约束、safe、超限原因）
 ├── src/productionMarks.js # 双面生产标记（裁切线 / 折线标 / 套准十字候选落位、正背坐标变换、省略原因）
 ├── src/verification.js    # 试印核验（观察校验、四种装订×翻转重算比对、候选排序与结论）
 ├── src/materialPrep.js    # 印刷备料（逐帖净用纸 / 开机损耗 / 过程损耗 / 需领纸 ceil、整包采购汇总）
